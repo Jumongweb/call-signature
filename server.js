@@ -1,0 +1,131 @@
+import http from 'node:http';
+import { readFile } from 'node:fs/promises';
+import { fileURLToPath } from 'node:url';
+import { loadEnvFile } from 'node:process';
+
+const MAX_BODY = 64 * 1024;
+const API_BASE = 'https://preprod-mtn-ghana.api.mtn.com/v2/customers';
+const publicFiles = new Map([
+  ['/', ['index.html', 'text/html; charset=utf-8']],
+  ['/app.js', ['app.js', 'text/javascript; charset=utf-8']],
+  ['/style.css', ['style.css', 'text/css; charset=utf-8']],
+]);
+
+function send(res, status, body, type = 'application/json; charset=utf-8') {
+  res.writeHead(status, {
+    'Content-Type': type,
+    'Cache-Control': 'no-store',
+    'X-Content-Type-Options': 'nosniff',
+    'Referrer-Policy': 'no-referrer',
+    'Content-Security-Policy': "default-src 'self'; script-src 'self'; style-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'",
+  });
+  res.end(type.startsWith('application/json') ? JSON.stringify(body) : body);
+}
+
+async function readBody(req) {
+  let size = 0;
+  const chunks = [];
+  for await (const chunk of req) {
+    size += chunk.length;
+    if (size > MAX_BODY) throw Object.assign(new Error('Request body is too large.'), { status: 413 });
+    chunks.push(chunk);
+  }
+  return Buffer.concat(chunks).toString('utf8');
+}
+
+function parseJson(raw) {
+  try { return JSON.parse(raw); }
+  catch { throw Object.assign(new Error('Request body must be valid JSON.'), { status: 400 }); }
+}
+
+function escapeHtml(value) {
+  return value.replace(/[&<>"']/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[char]);
+}
+
+function callbackPage(data) {
+  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>MTN Call Signature — Callback</title><link rel="stylesheet" href="/style.css"></head><body><main class="card wide"><div class="brand">MTN</div><p class="eyebrow">CALL SIGNATURE</p><h1>Callback received</h1><p>All query parameters and the request body received at this URL are shown below.</p><pre>${escapeHtml(JSON.stringify(data, null, 2))}</pre><a href="/">Back to Call Signature</a></main></body></html>`;
+}
+
+export function createApp({ env = process.env, fetchImpl = fetch } = {}) {
+  return http.createServer(async (req, res) => {
+    try {
+      const url = new URL(req.url, 'http://localhost');
+      if (url.pathname === '/callback' && ['GET', 'POST'].includes(req.method)) {
+        const rawBody = req.method === 'POST' ? await readBody(req) : '';
+        const contentType = req.headers['content-type'] || '';
+        let body = rawBody || null;
+        if (rawBody && contentType.includes('application/json')) {
+          try { body = JSON.parse(rawBody); } catch { /* Echo malformed payloads verbatim. */ }
+        } else if (rawBody && contentType.includes('application/x-www-form-urlencoded')) {
+          body = [...new URLSearchParams(rawBody)].map(([name, value]) => ({ name, value }));
+        }
+        return send(res, 200, callbackPage({
+          receivedAt: new Date().toISOString(), method: req.method,
+          query: [...url.searchParams].map(([name, value]) => ({ name, value })),
+          contentType: contentType || null, body, rawBody,
+        }), 'text/html; charset=utf-8');
+      }
+
+      if (url.pathname === '/api/consent' && req.method === 'POST') {
+        if (req.headers.origin && req.headers.origin !== `http://${req.headers.host}` && req.headers.origin !== `https://${req.headers.host}`) {
+          return send(res, 403, { error: 'Cross-origin requests are not allowed.' });
+        }
+        if (!req.headers['content-type']?.includes('application/json')) {
+          return send(res, 415, { error: 'Use application/json.' });
+        }
+        const input = parseJson(await readBody(req));
+        const phoneNumber = typeof input?.phoneNumber === 'string' ? input.phoneNumber.trim().replace(/[\s()+-]/g, '') : '';
+        if (!/^233\d{9}$/.test(phoneNumber)) {
+          return send(res, 400, { error: 'Enter a Ghana phone number in international format, e.g. 233542659565.' });
+        }
+        const apiKey = env.MTN_API_KEY?.trim();
+        if (!apiKey) return send(res, 503, { error: 'MTN API key is missing. Set MTN_API_KEY in .env and restart the server.' });
+        const payload = {
+          nodeId: env.MTN_NODE_ID || '211',
+          subscriptionId: env.MTN_SUBSCRIPTION_ID || '9921110005',
+          registrationChannel: env.MTN_REGISTRATION_CHANNEL || 'WEB',
+          subscriptionProviderId: env.MTN_SUBSCRIPTION_PROVIDER_ID || 'SM6D',
+        };
+        let upstream;
+        let raw;
+        try {
+          upstream = await fetchImpl(`${API_BASE}/${phoneNumber}/subscriptions`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'x-api-key': apiKey },
+            body: JSON.stringify(payload),
+            redirect: 'manual',
+            signal: AbortSignal.timeout(20000),
+          });
+          raw = await upstream.text();
+        } catch (error) {
+          const timeout = ['TimeoutError', 'AbortError'].includes(error.name);
+          return send(res, timeout ? 504 : 502, { error: timeout ? 'MTN did not respond within 20 seconds.' : 'Could not connect to MTN. Try again later.' });
+        }
+        let response = raw;
+        try { response = JSON.parse(raw); } catch { /* MTN may return plain text. */ }
+        // Avoid accidentally exposing the credential if an upstream error echoes it.
+        const result = JSON.parse(JSON.stringify({
+          ok: upstream.ok, upstreamStatus: upstream.status, phoneNumber,
+          request: payload, response,
+          location: upstream.headers.get('location'),
+        }).split(apiKey).join('[REDACTED]'));
+        return send(res, upstream.ok ? 200 : 502, result);
+      }
+
+      if (req.method === 'GET' && publicFiles.has(url.pathname)) {
+        const [file, type] = publicFiles.get(url.pathname);
+        return send(res, 200, await readFile(new URL(`./public/${file}`, import.meta.url)), type);
+      }
+      return send(res, 404, { error: 'Not found.' });
+    } catch (error) {
+      return send(res, error.status || 500, { error: error.status ? error.message : 'An unexpected server error occurred.' });
+    }
+  });
+}
+
+if (process.argv[1] === fileURLToPath(import.meta.url)) {
+  try { loadEnvFile(fileURLToPath(new URL('./.env', import.meta.url))); }
+  catch (error) { if (error.code !== 'ENOENT') throw error; }
+  const port = Number(process.env.PORT || 3000);
+  createApp().listen(port, () => console.log(`MTN Call Signature: http://localhost:${port}\nCallback: http://localhost:${port}/callback`));
+}

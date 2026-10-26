@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>MTN Call Signature</title>
+  <link rel="stylesheet" href="/style.css">
+  <script src="/app.js" defer></script>
+</head>
+<body>
+  <main class="card">
+    <div class="brand">MTN</div>
+    <p class="eyebrow">PREPRODUCTION TEST</p>
+    <h1>MTN Call Signature</h1>
+    <p>Enter your Ghana phone number to submit a subscription consent request.</p>
+    <form id="consent-form">
+      <label for="phone">Phone number</label>
+      <input id="phone" name="phoneNumber" type="tel" inputmode="tel" autocomplete="tel" value="233542659565" placeholder="233542659565" aria-describedby="phone-help" required maxlength="24">
+      <small id="phone-help">Use country code 233 followed by your 9-digit number.</small>
+      <button id="submit" type="submit">Submit</button>
+    </form>
+    <p id="status" role="status" aria-live="polite"></p>
+    <section id="result" hidden>
+      <h2>MTN API response</h2>
+      <pre id="response"></pre>
+    </section>
+    <footer><a href="/callback">View callback page</a><span>MTN Ghana · Test environment</span></footer>
+  </main>
+</body>
+</html>
