@@ -47,3 +47,15 @@ Responses are not stored; reopening the URL does not retrieve an earlier callbac
 ## Verification
 
 Run `npm test`. Tests verify the documented consent URL, offer code, staging/production selection, callback encoding, input validation, and callback viewer. They do not contact MTN or complete a live consent flow.
+
+## Debug a deployed attempt
+
+1. Push these changes and deploy that commit. In Render's Environment settings, check `MTN_CONSENT_ENV`, `MTN_OFFER_ID`, and `MTN_REDIRECT_URL`. Local `.env` changes do not update Render's environment settings.
+2. Open the service's **Logs** screen for the current time, rather than only the historical deployment log. At startup, `consent_configuration` shows the effective gateway, offer code, and callback origin/path. `configuration_error` means the settings need correction. Hosted requests reject localhost callbacks.
+3. In your browser's developer tools, open Network, enable Preserve log, and select **All** so you can see page navigations as well as fetch requests. Also enable Preserve log in Console if you want the request ID to remain after navigating to MTN.
+4. Submit the test number once. In Network, inspect `/api/consent`: HTTP 200 means our server prepared a URL. Copy its `requestId`, `consentUrl`, and `callbackUrl`. Find the matching `consent_prepared` and `request_completed` events in Render Logs. No outbound MTN request is made by Render.
+5. Inspect the subsequent `/Portal` navigation and redirects under the MTN domain. Check the final URL, any transaction ID, and responses for failed document or fetch requests. Even HTTP 200 on an MTN page can contain an application error. Errors inside MTN's portal will appear in the browser or MTN's own logs, not our Render logs.
+6. When the browser returns to `/callback`, `callback_received` records a separate request ID, query parameter names, and body size. The page displays the actual received parameters. A manual visit produces the same event and does not confirm consent. Request IDs are local diagnostics and are not sent as additional parameters to MTN, so use timestamps to compare the two legs.
+7. If MTN fails, give its support contact the exact test time/timezone, MTN transaction ID, gateway environment, offer, test number, and callback URL. Ask them to check offer configuration, test-number eligibility, and callback registration. Avoid changing several settings at once or switching to production without confirmation.
+
+Logs omit API keys, full phone numbers, callback query values, and callback bodies. The browser's `consentUrl` still contains the phone number; share diagnostic captures only with the intended recipient. Logs are diagnostic metadata, not a callback archive.

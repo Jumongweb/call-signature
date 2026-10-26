@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { createApp } from '../server.js';
 
 async function withApp(options, run) {
-  const server = createApp(options);
+  const server = createApp({ logger: () => {}, ...options });
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
   const base = `http://127.0.0.1:${server.address().port}`;
   try { await run(base); }
@@ -86,6 +86,9 @@ test('uses a local callback by default', async () => {
 test('rejects invalid gateway and callback configuration', async () => {
   for (const env of [
     { MTN_CONSENT_ENV: 'invalid' },
+    { MTN_CONSENT_ENV: 'constructor' },
+    { RENDER: 'true' },
+    { NODE_ENV: 'production', MTN_REDIRECT_URL: 'http://localhost:3000/callback' },
     { MTN_REDIRECT_URL: 'javascript:alert(1)' },
     { MTN_REDIRECT_URL: 'http://example.com/callback' },
     { MTN_REDIRECT_URL: 'https://user:password@example.com/callback' },
@@ -95,6 +98,40 @@ test('rejects invalid gateway and callback configuration', async () => {
       assert.equal((await consent(base, { phoneNumber: '233542659565' })).status, 503);
     });
   }
+});
+
+test('diagnostic logs identify requests without logging credentials or callback values', async () => {
+  const lines = [];
+  await withApp({
+    logger: line => lines.push(line),
+    env: {
+      MTN_API_KEY: 'private-api-key', MTN_REDIRECT_URL: 'https://example.com/callback?token=private-token',
+    },
+  }, async base => {
+    const res = await consent(base, { phoneNumber: '233542659565' });
+    const data = await res.json();
+    assert.equal(data.requestId, res.headers.get('X-Request-Id'));
+    const prepared = lines.map(line => JSON.parse(line)).find(line => line.event === 'consent_prepared');
+    assert.equal(prepared.requestId, data.requestId);
+    assert.equal(prepared.callbackUrl, 'https://example.com/callback');
+    assert.equal(prepared.environment, 'staging');
+    const cb = await fetch(`${base}/callback?token=private-token`, {
+      method: 'POST', body: 'private-body',
+    });
+    const cbHtml = await cb.text();
+    assert.ok(cbHtml.includes(cb.headers.get('X-Request-Id')));
+    const callback = lines.map(line => JSON.parse(line)).find(line => line.event === 'callback_received');
+    assert.deepEqual(callback.queryParameterNames, ['token']);
+    assert.equal(callback.bodyBytes, 12);
+    const logged = lines.join('\n');
+    for (const value of ['private-api-key', 'private-token', 'private-body', '233542659565']) {
+      assert.ok(!logged.includes(value));
+    }
+    const bad = await consent(base, { phoneNumber: 'bad' });
+    assert.equal(bad.status, 400);
+    const completed = lines.map(line => JSON.parse(line)).find(line => line.requestId === bad.headers.get('X-Request-Id'));
+    assert.equal(completed.status, 400);
+  });
 });
 
 test('rejects invalid phone numbers and malformed JSON', async () => {

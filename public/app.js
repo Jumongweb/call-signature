@@ -22,6 +22,11 @@ form.addEventListener('submit', async event => {
       body: JSON.stringify({ phoneNumber }),
     });
     const data = await res.json();
+    console.info('Consent request', {
+      requestId: data.requestId || res.headers.get('X-Request-Id'),
+      status: res.status,
+      message: res.ok ? 'Consent URL prepared; MTN consent is not yet confirmed.' : data.error,
+    });
     if (res.ok && data.ok && data.consentUrl) {
       status.textContent = 'Opening MTN’s consent page…';
       window.location.assign(data.consentUrl);

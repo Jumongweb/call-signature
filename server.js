@@ -2,6 +2,7 @@ import http from 'node:http';
 import { readFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { loadEnvFile } from 'node:process';
+import { randomUUID } from 'node:crypto';
 
 const MAX_BODY = 64 * 1024;
 const CONSENT_PORTALS = {
@@ -13,6 +14,31 @@ const publicFiles = new Map([
   ['/app.js', ['app.js', 'text/javascript; charset=utf-8']],
   ['/style.css', ['style.css', 'text/css; charset=utf-8']],
 ]);
+
+function consentConfig(env) {
+  const environment = env.MTN_CONSENT_ENV?.trim() || 'staging';
+  if (!Object.hasOwn(CONSENT_PORTALS, environment)) {
+    throw Object.assign(new Error('Set MTN_CONSENT_ENV to staging or production.'), { status: 503 });
+  }
+  let callback;
+  try {
+    callback = new URL(env.MTN_REDIRECT_URL?.trim() || `http://localhost:${env.PORT || 3000}/callback`);
+    const local = ['localhost', '127.0.0.1', '[::1]'].includes(callback.hostname);
+    if ((callback.protocol !== 'https:' && !(local && callback.protocol === 'http:')) || callback.username || callback.password || callback.hash) {
+      throw new Error('Invalid callback URL');
+    }
+    if (local && (env.RENDER === 'true' || env.NODE_ENV === 'production')) {
+      throw new Error('Public callback required');
+    }
+  } catch {
+    throw Object.assign(new Error('Set MTN_REDIRECT_URL to your public HTTPS callback URL. Local HTTP is allowed only for local development.'), { status: 503 });
+  }
+  return { environment, gateway: CONSENT_PORTALS[environment], callback, offerId: env.MTN_OFFER_ID?.trim() || '9931110005' };
+}
+
+function logEvent(logger, event, details) {
+  logger(JSON.stringify({ timestamp: new Date().toISOString(), event, ...details }));
+}
 
 function send(res, status, body, type = 'application/json; charset=utf-8') {
   res.writeHead(status, {
@@ -49,8 +75,16 @@ function callbackPage(data) {
   return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>MTN Call Signature — Callback</title><link rel="stylesheet" href="/style.css"></head><body><main class="card wide"><div class="brand">MTN</div><p class="eyebrow">CALL SIGNATURE</p><h1>Callback received</h1><p>All query parameters and the request body received at this URL are shown below.</p><pre>${escapeHtml(JSON.stringify(data, null, 2))}</pre><a href="/">Back to Call Signature</a></main></body></html>`;
 }
 
-export function createApp({ env = process.env } = {}) {
+export function createApp({ env = process.env, logger = line => console.info(line) } = {}) {
   return http.createServer(async (req, res) => {
+    const requestId = randomUUID();
+    const startedAt = Date.now();
+    res.setHeader('X-Request-Id', requestId);
+    const path = new URL(req.url, 'http://localhost').pathname;
+    const diagnosticRequest = ['/api/consent', '/callback'].includes(path);
+    if (diagnosticRequest) res.on('finish', () => logEvent(logger, 'request_completed', {
+      requestId, method: req.method, path, status: res.statusCode, durationMs: Date.now() - startedAt,
+    }));
     try {
       const url = new URL(req.url, 'http://localhost');
       if (url.pathname === '/callback' && ['GET', 'POST'].includes(req.method)) {
@@ -62,7 +96,14 @@ export function createApp({ env = process.env } = {}) {
         } else if (rawBody && contentType.includes('application/x-www-form-urlencoded')) {
           body = [...new URLSearchParams(rawBody)].map(([name, value]) => ({ name, value }));
         }
+        logEvent(logger, 'callback_received', {
+          requestId, method: req.method,
+          queryParameterNames: [...url.searchParams.keys()],
+          bodyBytes: Buffer.byteLength(rawBody), contentType: contentType || null,
+          // The caller might be a manual visitor. This event is not proof of consent.
+        });
         return send(res, 200, callbackPage({
+          requestId,
           receivedAt: new Date().toISOString(), method: req.method,
           query: [...url.searchParams].map(([name, value]) => ({ name, value })),
           contentType: contentType || null, body, rawBody,
@@ -81,26 +122,19 @@ export function createApp({ env = process.env } = {}) {
         if (!/^233\d{9}$/.test(phoneNumber)) {
           return send(res, 400, { error: 'Enter a Ghana phone number in international format, e.g. 233542659565.' });
         }
-        const gateway = CONSENT_PORTALS[env.MTN_CONSENT_ENV || 'staging'];
-        if (!gateway) return send(res, 503, { error: 'Set MTN_CONSENT_ENV to staging or production.' });
-        let callback;
-        try {
-          callback = new URL(env.MTN_REDIRECT_URL || `http://localhost:${env.PORT || 3000}/callback`);
-          const local = ['localhost', '127.0.0.1', '[::1]'].includes(callback.hostname);
-          if ((callback.protocol !== 'https:' && !(local && callback.protocol === 'http:')) || callback.username || callback.password || callback.hash) {
-            throw new Error('Invalid callback URL');
-          }
-        } catch {
-          return send(res, 503, { error: 'Set MTN_REDIRECT_URL to your public HTTPS callback URL (local HTTP is allowed for development).' });
-        }
-        const offerId = env.MTN_OFFER_ID || '9931110005';
+        const { gateway, callback, offerId, environment } = consentConfig(env);
         const consentUrl = new URL(gateway);
         consentUrl.searchParams.set('OfferCode', offerId);
         consentUrl.searchParams.set('mobileNumber', phoneNumber);
         consentUrl.searchParams.set('redirectUrl', callback.href);
         // MTN hosts the interactive consent flow. Navigate the browser there;
         // do not POST a subscription or fetch the portal from this server.
-        return send(res, 200, { ok: true, consentUrl: consentUrl.href, offerId, phoneNumber, callbackUrl: callback.href });
+        logEvent(logger, 'consent_prepared', {
+          requestId, environment, gateway, offerId,
+          phoneNumber: `${phoneNumber.slice(0, 3)}*****${phoneNumber.slice(-4)}`,
+          callbackUrl: `${callback.origin}${callback.pathname}`,
+        });
+        return send(res, 200, { ok: true, requestId, consentUrl: consentUrl.href, offerId, phoneNumber, callbackUrl: callback.href });
       }
 
       if (req.method === 'GET' && publicFiles.has(url.pathname)) {
@@ -109,7 +143,8 @@ export function createApp({ env = process.env } = {}) {
       }
       return send(res, 404, { error: 'Not found.' });
     } catch (error) {
-      return send(res, error.status || 500, { error: error.status ? error.message : 'An unexpected server error occurred.' });
+      logEvent(logger, 'request_error', { requestId, path, status: error.status || 500, errorType: error.name });
+      return send(res, error.status || 500, { requestId, error: error.status ? error.message : 'An unexpected server error occurred.' });
     }
   });
 }
@@ -118,5 +153,15 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
   try { loadEnvFile(fileURLToPath(new URL('./.env', import.meta.url))); }
   catch (error) { if (error.code !== 'ENOENT') throw error; }
   const port = Number(process.env.PORT || 3000);
-  createApp().listen(port, () => console.log(`MTN Call Signature: http://localhost:${port}\nCallback: http://localhost:${port}/callback`));
+  createApp().listen(port, () => {
+    console.log(`MTN Call Signature listening on port ${port}`);
+    try {
+      const { environment, gateway, offerId, callback } = consentConfig(process.env);
+      logEvent(console.info, 'consent_configuration', {
+        environment, gateway, offerId, callbackUrl: `${callback.origin}${callback.pathname}`,
+      });
+    } catch (error) {
+      logEvent(console.error, 'configuration_error', { error: error.message });
+    }
+  });
 }
