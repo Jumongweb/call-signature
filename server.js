@@ -4,7 +4,10 @@ import { fileURLToPath } from 'node:url';
 import { loadEnvFile } from 'node:process';
 
 const MAX_BODY = 64 * 1024;
-const API_BASE = 'https://preprod-mtn-ghana.api.mtn.com/v2/customers';
+const CONSENT_PORTALS = {
+  staging: 'https://sitcg.mtn.com.gh/Portal',
+  production: 'https://cg.mtn.com.gh/Portal',
+};
 const publicFiles = new Map([
   ['/', ['index.html', 'text/html; charset=utf-8']],
   ['/app.js', ['app.js', 'text/javascript; charset=utf-8']],
@@ -46,7 +49,7 @@ function callbackPage(data) {
   return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>MTN Call Signature — Callback</title><link rel="stylesheet" href="/style.css"></head><body><main class="card wide"><div class="brand">MTN</div><p class="eyebrow">CALL SIGNATURE</p><h1>Callback received</h1><p>All query parameters and the request body received at this URL are shown below.</p><pre>${escapeHtml(JSON.stringify(data, null, 2))}</pre><a href="/">Back to Call Signature</a></main></body></html>`;
 }
 
-export function createApp({ env = process.env, fetchImpl = fetch } = {}) {
+export function createApp({ env = process.env } = {}) {
   return http.createServer(async (req, res) => {
     try {
       const url = new URL(req.url, 'http://localhost');
@@ -78,38 +81,26 @@ export function createApp({ env = process.env, fetchImpl = fetch } = {}) {
         if (!/^233\d{9}$/.test(phoneNumber)) {
           return send(res, 400, { error: 'Enter a Ghana phone number in international format, e.g. 233542659565.' });
         }
-        const apiKey = env.MTN_API_KEY?.trim();
-        if (!apiKey) return send(res, 503, { error: 'MTN API key is missing. Set MTN_API_KEY in .env and restart the server.' });
-        const payload = {
-          nodeId: env.MTN_NODE_ID || '211',
-          subscriptionId: env.MTN_SUBSCRIPTION_ID || '9921110005',
-          registrationChannel: env.MTN_REGISTRATION_CHANNEL || 'WEB',
-          subscriptionProviderId: env.MTN_SUBSCRIPTION_PROVIDER_ID || 'SM6D',
-        };
-        let upstream;
-        let raw;
+        const gateway = CONSENT_PORTALS[env.MTN_CONSENT_ENV || 'staging'];
+        if (!gateway) return send(res, 503, { error: 'Set MTN_CONSENT_ENV to staging or production.' });
+        let callback;
         try {
-          upstream = await fetchImpl(`${API_BASE}/${phoneNumber}/subscriptions`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json', 'x-api-key': apiKey },
-            body: JSON.stringify(payload),
-            redirect: 'manual',
-            signal: AbortSignal.timeout(20000),
-          });
-          raw = await upstream.text();
-        } catch (error) {
-          const timeout = ['TimeoutError', 'AbortError'].includes(error.name);
-          return send(res, timeout ? 504 : 502, { error: timeout ? 'MTN did not respond within 20 seconds.' : 'Could not connect to MTN. Try again later.' });
+          callback = new URL(env.MTN_REDIRECT_URL || `http://localhost:${env.PORT || 3000}/callback`);
+          const local = ['localhost', '127.0.0.1', '[::1]'].includes(callback.hostname);
+          if ((callback.protocol !== 'https:' && !(local && callback.protocol === 'http:')) || callback.username || callback.password || callback.hash) {
+            throw new Error('Invalid callback URL');
+          }
+        } catch {
+          return send(res, 503, { error: 'Set MTN_REDIRECT_URL to your public HTTPS callback URL (local HTTP is allowed for development).' });
         }
-        let response = raw;
-        try { response = JSON.parse(raw); } catch { /* MTN may return plain text. */ }
-        // Avoid accidentally exposing the credential if an upstream error echoes it.
-        const result = JSON.parse(JSON.stringify({
-          ok: upstream.ok, upstreamStatus: upstream.status, phoneNumber,
-          request: payload, response,
-          location: upstream.headers.get('location'),
-        }).split(apiKey).join('[REDACTED]'));
-        return send(res, upstream.ok ? 200 : 502, result);
+        const offerId = env.MTN_OFFER_ID || '9931110005';
+        const consentUrl = new URL(gateway);
+        consentUrl.searchParams.set('OfferCode', offerId);
+        consentUrl.searchParams.set('mobileNumber', phoneNumber);
+        consentUrl.searchParams.set('redirectUrl', callback.href);
+        // MTN hosts the interactive consent flow. Navigate the browser there;
+        // do not POST a subscription or fetch the portal from this server.
+        return send(res, 200, { ok: true, consentUrl: consentUrl.href, offerId, phoneNumber, callbackUrl: callback.href });
       }
 
       if (req.method === 'GET' && publicFiles.has(url.pathname)) {

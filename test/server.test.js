@@ -30,71 +30,82 @@ test('page serves the test number and scripts without exposing credentials', asy
   });
 });
 
-test('submits the exact supplied MTN request with the selected phone number', async () => {
-  let calls = 0;
-  await withApp({
-    env: { MTN_API_KEY: 'secret-test-key' },
-    fetchImpl: async (url, options) => {
-      calls++;
-      assert.equal(url, 'https://preprod-mtn-ghana.api.mtn.com/v2/customers/233542659565/subscriptions');
-      assert.equal(options.method, 'POST');
-      assert.equal(options.headers['x-api-key'], 'secret-test-key');
-      assert.equal(options.redirect, 'manual');
-      assert.deepEqual(JSON.parse(options.body), {
-        nodeId: '211', subscriptionId: '9921110005',
-        registrationChannel: 'WEB', subscriptionProviderId: 'SM6D',
-      });
-      return new Response(JSON.stringify({ status: 'pending' }), { status: 202 });
-    },
-  }, async base => {
-    const res = await consent(base, { phoneNumber: '+233 54 265 9565' });
+test('builds the documented staging consent URL without making any outbound API call', async () => {
+  const originalFetch = globalThis.fetch;
+  let outboundCalls = 0;
+  globalThis.fetch = async (...args) => {
+    const target = String(args[0]);
+    if (!target.startsWith('http://127.0.0.1:')) {
+      outboundCalls++;
+      throw new Error('Unexpected outbound MTN request');
+    }
+    return originalFetch(...args);
+  };
+  try {
+    await withApp({ env: { MTN_REDIRECT_URL: 'https://example.com/callback?source=call&test=1' } }, async base => {
+      const res = await consent(base, { phoneNumber: '+233 54 265 9565' });
+      assert.equal(res.status, 200);
+      const body = await res.json();
+      assert.equal(body.offerId, '9931110005');
+      const url = new URL(body.consentUrl);
+      assert.equal(url.origin, 'https://sitcg.mtn.com.gh');
+      assert.equal(url.pathname, '/Portal');
+      assert.deepEqual([...url.searchParams], [
+        ['OfferCode', '9931110005'],
+        ['mobileNumber', '233542659565'],
+        ['redirectUrl', 'https://example.com/callback?source=call&test=1'],
+      ]);
+      assert.equal(outboundCalls, 0);
+    });
+  } finally { globalThis.fetch = originalFetch; }
+});
+
+test('supports production with a configured offer and callback', async () => {
+  await withApp({ env: {
+    MTN_CONSENT_ENV: 'production', MTN_OFFER_ID: 'custom-offer',
+    MTN_REDIRECT_URL: 'https://example.com/callback',
+  } }, async base => {
+    const res = await consent(base, { phoneNumber: '233542659565' });
     assert.equal(res.status, 200);
     const body = await res.json();
-    assert.equal(body.ok, true);
-    assert.equal(body.upstreamStatus, 202);
-    assert.deepEqual(body.response, { status: 'pending' });
-    assert.equal(calls, 1);
+    const url = new URL(body.consentUrl);
+    assert.equal(url.origin, 'https://cg.mtn.com.gh');
+    assert.equal(url.searchParams.get('OfferCode'), 'custom-offer');
+    assert.equal(url.searchParams.get('redirectUrl'), 'https://example.com/callback');
   });
 });
 
-test('rejects bad input and missing configuration before calling MTN', async () => {
-  await withApp({ env: {}, fetchImpl: () => assert.fail('must not call MTN') }, async base => {
+test('uses a local callback by default', async () => {
+  await withApp({ env: { PORT: '4000' } }, async base => {
+    const res = await consent(base, { phoneNumber: '233542659565' });
+    assert.equal(res.status, 200);
+    assert.equal((await res.json()).callbackUrl, 'http://localhost:4000/callback');
+  });
+});
+
+test('rejects invalid gateway and callback configuration', async () => {
+  for (const env of [
+    { MTN_CONSENT_ENV: 'invalid' },
+    { MTN_REDIRECT_URL: 'javascript:alert(1)' },
+    { MTN_REDIRECT_URL: 'http://example.com/callback' },
+    { MTN_REDIRECT_URL: 'https://user:password@example.com/callback' },
+    { MTN_REDIRECT_URL: 'https://example.com/callback#fragment' },
+  ]) {
+    await withApp({ env }, async base => {
+      assert.equal((await consent(base, { phoneNumber: '233542659565' })).status, 503);
+    });
+  }
+});
+
+test('rejects invalid phone numbers and malformed JSON', async () => {
+  await withApp({ env: {} }, async base => {
     assert.equal((await consent(base, { phoneNumber: '123' })).status, 400);
     assert.equal((await consent(base, null)).status, 400);
-    const missing = await consent(base, { phoneNumber: '233542659565' });
-    assert.equal(missing.status, 503);
-    assert.match((await missing.json()).error, /MTN_API_KEY/);
     const malformed = await fetch(`${base}/api/consent`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{',
     });
     assert.equal(malformed.status, 400);
   });
-});
-
-test('returns MTN failures and redacts an echoed API key', async () => {
-  await withApp({
-    env: { MTN_API_KEY: 'secret-test-key' },
-    fetchImpl: async () => new Response('Rejected secret-test-key', { status: 401 }),
-  }, async base => {
-    const res = await consent(base, { phoneNumber: '233542659565' });
-    assert.equal(res.status, 502);
-    const body = await res.json();
-    assert.equal(body.upstreamStatus, 401);
-    assert.equal(body.response, 'Rejected [REDACTED]');
-  });
-});
-
-test('handles network failures and timeouts', async () => {
-  for (const [name, expected] of [['TypeError', 502], ['TimeoutError', 504]]) {
-    await withApp({
-      env: { MTN_API_KEY: 'secret-test-key' },
-      fetchImpl: async () => { throw Object.assign(new Error('private upstream details'), { name }); },
-    }, async base => {
-      const res = await consent(base, { phoneNumber: '233542659565' });
-      assert.equal(res.status, expected);
-      assert.ok(!(await res.text()).includes('private upstream details'));
-    });
-  }
 });
 
 test('callback preserves repeated query parameters and escapes HTML', async () => {
@@ -128,7 +139,7 @@ test('callback displays JSON, form values, and raw POST bodies', async () => {
   });
 });
 
-test('rejects oversized callbacks and cross-origin subscription requests', async () => {
+test('rejects oversized callbacks and cross-origin consent requests', async () => {
   await withApp({}, async base => {
     const large = await fetch(`${base}/callback`, { method: 'POST', body: 'x'.repeat(65537) });
     assert.equal(large.status, 413);

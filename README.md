@@ -1,28 +1,49 @@
 # MTN Call Signature
 
-Small Node.js application using the supplied MTN Ghana preproduction subscription API. Requires Node.js 20.12 or newer. No dependencies to install.
+Small Node.js application for MTN Ghana Call Signature consent. Requires Node.js 20.12 or newer. No dependencies to install.
 
-## Run
+## Run locally
 
-1. Set `MTN_API_KEY=your-real-api-key` in `.env` in this project directory. If `.env` is missing, copy `.env.example` to `.env` first. `.env` is ignored by Git.
+1. Copy `.env.example` to `.env` if needed.
 2. Run `npm start`.
-3. Open http://localhost:3000. The test number `233542659565` is prefilled. Click Submit to make a real preproduction API request.
+3. Open http://localhost:3000. The test number `233542659565` is prefilled. Submit opens MTN’s interactive consent portal in the same browser tab.
 
-Restart the server after changing `.env`. Environment variables already set by the hosting environment take precedence over `.env`. The key is used only by the server.
+No API key is required by the consent URL documented in the supplied screenshot. Any existing `MTN_API_KEY` is ignored. There is no subscription API call.
 
-The server posts to `https://preprod-mtn-ghana.api.mtn.com/v2/customers/{phoneNumber}/subscriptions` using the four fields in the supplied curl. Defaults are `nodeId=211`, `subscriptionId=9921110005`, `registrationChannel=WEB`, and `subscriptionProviderId=SM6D`. Optional overrides are listed in `.env.example`. Confirm with MTN whether `subscriptionId` is the intended offer ID and whether this endpoint starts consent or subscribes directly.
+Restart after changing `.env`. Hosting environment variables take precedence over `.env`.
+
+## Configuration and deployment
+
+Set these variables in `.env` locally or in your host’s Environment settings:
+
+```dotenv
+MTN_OFFER_ID=9931110005
+MTN_CONSENT_ENV=staging
+MTN_REDIRECT_URL=https://YOUR-HOST/callback
+```
+
+Use your actual public HTTPS host for deployment. Local development defaults to `http://localhost:3000/callback` (or the configured `PORT`). MTN may require the return URL to be registered or allowlisted; confirm its requirements with your contact.
+
+`MTN_CONSENT_ENV=staging` selects `https://sitcg.mtn.com.gh/Portal`. Use `production` to select `https://cg.mtn.com.gh/Portal`. Confirm the offer’s target environment with MTN before switching.
+
+The server builds a URL with exactly these documented, case-sensitive query parameters:
+
+- `OfferCode`: `9931110005`
+- `mobileNumber`: the entered Ghana phone number
+- `redirectUrl`: the configured callback URL
+
+The browser navigates to MTN to complete consent. The non-header-enrichment flow uses HTTPS, as specified in the screenshot. The server does not fetch the portal, collect consent itself, or call `/subscriptions`.
+
+On Render, use a Node Web Service with build command `npm install` and start command `npm start`. Let the host provide `PORT`. Set the three variables above, especially `MTN_REDIRECT_URL`, before testing the deployed flow.
 
 ## Callback
 
-Callback route: http://localhost:3000/callback
-
 Example: http://localhost:3000/callback?status=success&phoneNumber=233542659565
 
-The route accepts GET and POST and displays all query values (including repeated names), the parsed POST body, and the raw body. HTML is escaped. Responses are not stored; a server-to-server POST is visible to its caller only. Reopening the URL does not retrieve an earlier callback.
+The route accepts GET and POST and displays all query values (including repeated names), the parsed POST body, and the raw body. HTML is escaped. It echoes whichever parameters MTN sends without assuming their names or treating the redirect as authenticated proof of activation.
 
-For MTN to reach this route, deploy the app on a public HTTPS host and register `https://YOUR-HOST/callback` with MTN using its documented configuration process. A local URL cannot receive external MTN callbacks. The supplied request has no callback URL field, so this implementation does not invent one or assume MTN will invoke it. Obtain the callback setup instructions from MTN to finish that integration. Callback content is displayed for diagnostics and is not treated as authenticated proof of subscription.
+Responses are not stored; reopening the URL does not retrieve an earlier callback. The screenshot does not define callback parameter names or guarantee that a local return URL is accepted. A full live test requires completing MTN’s portal and observing the browser return.
 
 ## Verification
 
-Run `npm test`. Tests use a mock MTN response and never call the live subscription API. The real API call requires your key and happens when you submit the form. This is a small test app; protect access before exposing the subscription action publicly.
-# call-signature
+Run `npm test`. Tests verify the documented consent URL, offer code, staging/production selection, callback encoding, input validation, and callback viewer. They do not contact MTN or complete a live consent flow.

@@ -14,7 +14,7 @@ form.addEventListener('submit', async event => {
   }
   button.disabled = true;
   button.textContent = 'Submitting…';
-  status.textContent = 'Waiting for MTN…';
+  status.textContent = 'Preparing MTN consent page…';
   result.hidden = true;
   try {
     const res = await fetch('/api/consent', {
@@ -22,9 +22,12 @@ form.addEventListener('submit', async event => {
       body: JSON.stringify({ phoneNumber }),
     });
     const data = await res.json();
-    status.textContent = data.ok
-      ? 'MTN accepted the API request. Check the response for the consent or subscription status.'
-      : data.error || `MTN returned HTTP ${data.upstreamStatus}. See the response below.`;
+    if (res.ok && data.ok && data.consentUrl) {
+      status.textContent = 'Opening MTN’s consent page…';
+      window.location.assign(data.consentUrl);
+      return;
+    }
+    status.textContent = data.error || 'Could not prepare the MTN consent page.';
     response.textContent = JSON.stringify(data, null, 2);
     result.hidden = false;
   } catch {
