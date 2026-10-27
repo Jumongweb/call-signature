@@ -16,7 +16,7 @@ const publicFiles = new Map([
 ]);
 
 function consentConfig(env) {
-  const environment = env.MTN_CONSENT_ENV?.trim() || 'staging';
+  const environment = env.MTN_CONSENT_ENV?.trim() || 'production';
   if (!Object.hasOwn(CONSENT_PORTALS, environment)) {
     throw Object.assign(new Error('Set MTN_CONSENT_ENV to staging or production.'), { status: 503 });
   }

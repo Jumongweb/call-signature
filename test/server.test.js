@@ -42,7 +42,7 @@ test('builds the documented staging consent URL without making any outbound API 
     return originalFetch(...args);
   };
   try {
-    await withApp({ env: { MTN_REDIRECT_URL: 'https://example.com/callback?source=call&test=1' } }, async base => {
+    await withApp({ env: { MTN_CONSENT_ENV: 'staging', MTN_REDIRECT_URL: 'https://example.com/callback?source=call&test=1' } }, async base => {
       const res = await consent(base, { phoneNumber: '+233 54 265 9565' });
       assert.equal(res.status, 200);
       const body = await res.json();
@@ -75,11 +75,14 @@ test('supports production with a configured offer and callback', async () => {
   });
 });
 
-test('uses a local callback by default', async () => {
+test('defaults to the production portal and a local development callback', async () => {
   await withApp({ env: { PORT: '4000' } }, async base => {
     const res = await consent(base, { phoneNumber: '233542659565' });
     assert.equal(res.status, 200);
-    assert.equal((await res.json()).callbackUrl, 'http://localhost:4000/callback');
+    const data = await res.json();
+    assert.equal(data.callbackUrl, 'http://localhost:4000/callback');
+    assert.equal(new URL(data.consentUrl).origin, 'https://cg.mtn.com.gh');
+    assert.equal(new URL(data.consentUrl).searchParams.get('OfferCode'), '9931110005');
   });
 });
 
@@ -114,7 +117,7 @@ test('diagnostic logs identify requests without logging credentials or callback 
     const prepared = lines.map(line => JSON.parse(line)).find(line => line.event === 'consent_prepared');
     assert.equal(prepared.requestId, data.requestId);
     assert.equal(prepared.callbackUrl, 'https://example.com/callback');
-    assert.equal(prepared.environment, 'staging');
+    assert.equal(prepared.environment, 'production');
     const cb = await fetch(`${base}/callback?token=private-token`, {
       method: 'POST', body: 'private-body',
     });

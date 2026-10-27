@@ -18,13 +18,13 @@ Set these variables in `.env` locally or in your host’s Environment settings:
 
 ```dotenv
 MTN_OFFER_ID=9931110005
-MTN_CONSENT_ENV=staging
+MTN_CONSENT_ENV=production
 MTN_REDIRECT_URL=https://YOUR-HOST/callback
 ```
 
 Use your actual public HTTPS host for deployment. Local development defaults to `http://localhost:3000/callback` (or the configured `PORT`). MTN may require the return URL to be registered or allowlisted; confirm its requirements with your contact.
 
-`MTN_CONSENT_ENV=staging` selects `https://sitcg.mtn.com.gh/Portal`. Use `production` to select `https://cg.mtn.com.gh/Portal`. Confirm the offer’s target environment with MTN before switching.
+`MTN_CONSENT_ENV=production` selects `https://cg.mtn.com.gh/Portal` and is the default. Use `staging` only when you need `https://sitcg.mtn.com.gh/Portal`. Set `MTN_CONSENT_ENV=production` explicitly in Render too: an existing staging environment variable overrides the code default.
 
 The server builds a URL with exactly these documented, case-sensitive query parameters:
 
